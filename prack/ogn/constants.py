@@ -31,44 +31,83 @@ CATEGORIES: list[dict] = [
 
 ADDRESS_TYPES = {0: "random", 1: "ICAO", 2: "FLARM", 3: "OGN"}
 
-# APRS "tocall" (destination) -> data source
+# APRS "tocall" (destination) -> data source, see
+# https://github.com/glidernet/ogn-aprs-protocol/blob/master/tocalls.txt
 SOURCES: dict[str, str] = {
+    "APRS": "OGN",
     "OGFLR": "FLARM",
+    "OGNFLR": "FLARM",
     "OGFLR6": "FLARM",
     "OGFLR7": "FLARM",
     "OGNFNT": "FANET",
     "OGNTRK": "OGN tracker",
+    "OGADSL": "OGN tracker (ADS-L)",
+    "OGNMYC": "MyCloudbase",
+    "OGADSB": "ADS-B",
+    "OGNADSB": "ADS-B",
+    "OGMLAT": "OGN MLAT",
     "OGNSKY": "SafeSky",
     "OGNPUR": "PureTrack",
     "OGPUR": "PureTrack",
+    "OGNAVI": "Naviter",
+    "OGFLYM": "Flymaster",
     "OGLT24": "LiveTrack24",
     "OGNLT24": "LiveTrack24",
+    "OGSKYL": "SkyLines",
     "OGSPOT": "SPOT",
+    "OGSPID": "Spider",
     "OGINRE": "inReach",
     "OGNINRE": "inReach",
-    "OGFLYM": "Flymaster",
-    "OGSKYL": "SkyLines",
     "OGCAPT": "Capturs",
-    "OGNAVI": "Naviter",
-    "OGADSB": "ADS-B",
-    "OGNADSB": "ADS-B",
+    "OGAIRM": "AirMate",
+    "OGNWMN": "Wingman",
+    "OGNWGL": "WeGlide",
+    "OGSKYB": "SkyBase",
+    "OGNVVO": "VarioVoice",
+    "OGNVOL": "Volandoo",
+    "OGPGP": "pgpilot",
+    "OGNALP": "Alpium",
+    "OGEVARIO": "eVario",
+    "FXCAPP": "flyXC",
     "OGPAW": "PilotAware",
+    "OGNPAW": "PilotAware",
     "OGNMTK": "Microtrak",
-    "OGNXCG": "XCGlobe",
-    "OGNDSX": "DeviceX",
-    "OGNEMO": "Emotion",
+    "OGNMKT": "Microtrak",
+    "OGNDSX": "DSX",
+    "OGNMAV": "MAVLink",
+    "OGNTTN": "TTN",
+    "OGNHEL": "Helium",
+    "OGAVZ": "Aviaze",
+    "OGSTUX": "Stratux",
     "OGAPIK": "APIK",
+    "OGMSHT": "Meshtastic",
+    "OGBSTOP": "BirdStop",
+    "OGNFNO": "Flying Neurons",
 }
 
-# Destination calls used by receivers (ground stations), never aircraft
-RECEIVER_TOCALLS = {"OGNSDR", "OGNDVS", "OGNDELAY"}
+# Destination calls used by ground stations / weather stations, never aircraft
+RECEIVER_TOCALLS = {"OGNSDR", "OGNDVS", "OGNEMO", "OGNSXR"}
+
+# Sources whose position messages carry no "id" field at all
+NO_ID_SOURCES = {"OGFLYM", "OGCAPT"}
+
+# Aircraft type for sources that do not transmit one. Flymaster builds paragliding / hang
+# gliding instruments, so its users are counted as paragliders.
+SOURCE_DEFAULT_TYPES = {"OGFLYM": 7}
+
+
+def normalize_tocall(tocall: str) -> str:
+    """Strip an APRS version suffix: "OGNAVI-1" -> "OGNAVI"."""
+    return tocall.split("-", 1)[0].upper()
 
 
 def source_for(tocall: str) -> str:
+    tocall = normalize_tocall(tocall)
     if tocall in SOURCES:
         return SOURCES[tocall]
-    if tocall.startswith("OGFLR"):
-        return "FLARM"
+    for prefix, name in (("OGFLR", "FLARM"), ("OGTTN", "TTN"), ("OGNTTN", "TTN")):
+        if tocall.startswith(prefix):
+            return name
     return tocall
 
 

@@ -129,3 +129,20 @@ def test_restore_closes_active_flights(runtime):
     f = _flights(runtime)[0]
     assert f.status == "closed" and f.close_reason == "gap"
     assert "FLRDD1234" in fresh.states
+
+
+def test_diagnostic_counters(runtime):
+    tracker = Tracker(runtime.db, runtime.settings, runtime.regions)
+    ts = START
+    tracker.process_line(aprs(ts, 46.6, 7.6, 11000, 800, 90, address="4B1234", aircraft_type=9, addr_type=1, prefix="ICA", tocall="OGADSB"), ts)
+    tracker.process_line(aprs(ts, 46.6, 7.7, 2000, 30, 90, address="07220E"), ts)
+    tracker.process_line("XYZ123456>OGNEW,qAS,Somewhere:/090000h4636.00N/00736.00E'000/000/A=001000 idWEIRD!", ts)
+    assert tracker.sources == {"ADS-B": 1, "FLARM": 1}
+    assert tracker.types == {9: 1, 7: 1}
+    assert tracker.counters["ignored_type"] == 1
+    # a position message with a malformed id is reported as undecodable, with a sample
+    assert tracker.counters["unparsed"] == 1
+    assert tracker.unparsed_samples[0].startswith("XYZ123456>OGNEW")
+    # an unknown id format is still an aircraft, just without a type
+    tracker.process_line("XYZ123456>OGNEW,qAS,Somewhere:/090000h4636.00N/00736.00E'000/000/A=001000 idWEIRD", ts)
+    assert tracker.sources["OGNEW"] == 1 and tracker.types[0] == 1

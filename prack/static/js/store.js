@@ -31,6 +31,7 @@ export const state = {
   basemap: storageGet('basemap', null),
   weather: null,
   wxOpen: false,
+  status: null, // last /api/status response
   // bumped whenever the corresponding data changes (lets the map reuse layer data)
   versions: { live: 0, filters: 0, day: 0, track: 0 },
 };

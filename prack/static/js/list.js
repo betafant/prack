@@ -84,6 +84,15 @@ function flightItem(f, selId) {
   </li>`;
 }
 
+function emptyLiveMessage() {
+  if (state.live.size) return 'NO TRAFFIC<br>CHECK FILTERS (PG / HG / GL, GND, SEARCH)';
+  const s = state.status;
+  if (!s || !['connected', 'demo'].includes(s.link.state)) return 'NO TRAFFIC<br>WAITING FOR OGN DATA…';
+  const other = s.received_types_untracked || 0;
+  return 'NO PARAGLIDERS, HANG GLIDERS OR GLIDERS<br>RECEIVED IN THE LAST MINUTES'
+    + (other ? `<br><br><span class="muted">${other} messages from other aircraft types ignored<br>(airliners, powered aircraft, …)</span>` : '');
+}
+
 export function renderList() {
   const ul = $('#flight-list');
   const live = state.mode === 'live';
@@ -92,7 +101,7 @@ export function renderList() {
   if (live) {
     items = visibleLive().sort(LIVE_SORT[state.sort.live] || LIVE_SORT.alt);
     ul.innerHTML = items.map((a) => liveItem(a, selId)).join('')
-      || `<li class="list-empty">NO TRAFFIC<br>${state.live.size ? 'CHECK FILTERS' : 'WAITING FOR OGN DATA…'}</li>`;
+      || `<li class="list-empty">${emptyLiveMessage()}</li>`;
   } else {
     items = visibleFlights().sort(FLIGHT_SORT[state.sort.history] || FLIGHT_SORT.takeoff);
     ul.innerHTML = items.map((f) => flightItem(f, selId)).join('')

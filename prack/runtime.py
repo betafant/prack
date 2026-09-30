@@ -16,6 +16,7 @@ from .db import Database, utcnow
 from .elevation import ElevationService
 from .models import Flight
 from .ogn.aprs import AprsClient, LinkStatus
+from .ogn.constants import AIRCRAFT_TYPES
 from .ogn.ddb import DdbInfo, DeviceDatabase
 from .ogn.simulator import Simulator
 from .regions import load_regions
@@ -202,6 +203,15 @@ class Runtime:
             "queue": self.lines.qsize(),
             "dropped_lines": self.dropped_lines,
             "tracker": dict(self.tracker.counters),
+            "tracked_types": list(self.settings.tracked_types),
+            "received_sources": dict(self.tracker.sources.most_common()),
+            "received_types": {
+                AIRCRAFT_TYPES.get(t, ("", str(t)))[1]: n for t, n in self.tracker.types.most_common()
+            },
+            "received_types_untracked": sum(
+                n for t, n in self.tracker.types.items() if t not in self.settings.tracked_types
+            ),
+            "unparsed_samples": list(self.tracker.unparsed_samples),
             "live_aircraft": sum(1 for st in self.tracker.states.values() if st.live and st.last is not None),
             "ddb_devices": len(self.ddb),
             "ddb_updated": self.ddb.last_update,

@@ -16,8 +16,9 @@ Austria, the French Alps or anywhere else takes a few minutes (see [Regions](#re
 
 ## Features
 
-- **Live map**: all paragliders, hang gliders and gliders received by OGN (FLARM, FANET, OGN
-  trackers and other sources relayed by OGN), with heading-oriented symbols, trails and labels.
+- **Live map**: all paragliders, hang gliders and gliders received by OGN: FLARM, FANET, OGN
+  trackers and the apps and services relayed by OGN (SeeYou Navigator / Naviter, Flymaster,
+  SafeSky, PureTrack, SkyBase, VarioVoice, ...), with heading-oriented symbols, trails and labels.
   Updates are pushed to the browser every ~1.5 s (server-sent events).
 - **Flight details**: select an aircraft or flight to see identity (FANET pilot name, OGN device
   database registration / competition number), variometer, altitude, AGL, ground speed, heading,
@@ -107,10 +108,23 @@ The interactive API documentation is at `/api/docs`.
 prack run [--demo] [--host 0.0.0.0] [--port 8000]
 prack weather --date 2026-07-15 --days 7   # download the weather of past days
 prack ddb                                  # refresh the OGN device database now
+prack diagnose --seconds 60                # listen to OGN and report what arrives / why it is dropped
 prack export 123 --format igc              # export flight 123
 prack replay capture.txt --date 2026-07-15 # feed raw APRS lines (e.g. a capture) through the tracker
 prack demo-seed --days 3                   # simulate past days (demo data)
 ```
+
+### Troubleshooting
+
+- **No aircraft although OGN is connected**: run `prack diagnose --seconds 120` while traffic is
+  visible on [live.glidernet.org](https://live.glidernet.org). It lists every aircraft received,
+  its type and source, and why it is shown or dropped (type not tracked, no-tracking flag,
+  outside the region, ...). Aircraft on the ground are only listed with the **GND** key on.
+- Some sources (LiveTrack24, SPOT, Spider, SkyLines, Capturs, AirMate) do not transmit an aircraft
+  type. They are "Unknown" and not tracked by default; add type `0` to `PRACK_TRACKED_TYPES` to
+  include them (shown as OTH).
+- **Windows**: prack needs the `tzdata` package (installed automatically since 0.1.0 of this
+  branch; run `pip install .` again after updating).
 
 ## Regions
 

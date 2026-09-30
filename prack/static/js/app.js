@@ -333,6 +333,12 @@ async function pollStatus() {
     const ac = $('#ann-ac');
     ac.className = `annun ${s.live_aircraft ? 'ok' : ''}`;
     ac.querySelector('.annun-val').textContent = s.live_aircraft;
+    const received = Object.entries(s.received_types || {}).map(([t, n]) => `${t} ${n}`).join(', ');
+    ac.title = `Tracked aircraft (types ${s.tracked_types.join(', ')}) seen in the last minutes: ${s.live_aircraft}`
+      + (received ? `\nMessages received since start by aircraft type: ${received}` : '');
+    const hadStatus = !!state.status;
+    state.status = s;
+    if (!hadStatus && state.mode === 'live') scheduleRender();
     const now = Date.now();
     if (statusInfo.lastLines != null && now > statusInfo.lastAt) {
       const rate = ((s.link.lines - statusInfo.lastLines) / (now - statusInfo.lastAt)) * 60000;

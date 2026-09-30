@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from .constants import RECEIVER_TOCALLS, source_for
+from .constants import NO_ID_SOURCES, RECEIVER_TOCALLS, SOURCE_DEFAULT_TYPES, normalize_tocall, source_for
 
 KNOTS_TO_KMH = 1.852
 FEET_TO_M = 0.3048
@@ -38,7 +38,7 @@ NAME_RE = re.compile(r'Name="([^"]*)"')
 
 _TOKENS: list[tuple[str, re.Pattern]] = [
     ("precision", re.compile(r"^!W(\d)(\d)!$")),
-    ("id", re.compile(r"^id([0-9A-Fa-f]{2})([0-9A-Fa-f]{6})$")),
+    ("id", re.compile(r"^id([0-9A-Za-z-]+)$")),
     ("climb", re.compile(r"^([+-]?\d+)fpm$")),
     ("turn", re.compile(r"^([+-]?\d+(?:\.\d+)?)rot$")),
     ("flight_level", re.compile(r"^FL(\d+(?:\.\d+)?)$")),
@@ -125,6 +125,42 @@ def _coord(value: str, deg_digits: int, hemisphere: str, extra: int | None) -> f
     return -result if hemisphere in ("S", "W") else result
 
 
+HEX = set("0123456789ABCDEF")
+
+
+def decode_id(value: str, callsign: str) -> tuple[str, int, int, bool, bool] | None:
+    """Decode the ``id`` field: (address, address type, aircraft type, stealth, no-tracking).
+
+    * 8 hex digits (FLARM, FANET, OGN trackers, ...): flags byte ``STttttaa`` + 24 bit address
+    * 10 hex digits (Naviter): 40 bits, stealth bit 39, no-track bit 38, aircraft type bits 34-37,
+      address type bits 28-33, address bits 0-23
+    * anything else (LiveTrack24 / Skylines user ids, IMEI numbers, ...): no type information
+    """
+    v = value.upper()
+    if len(v) == 8 and set(v) <= HEX:
+        flags = int(v[:2], 16)
+        return v[2:], flags & 0x03, (flags >> 2) & 0x0F, bool(flags & 0x80), bool(flags & 0x40)
+    if len(v) == 10 and set(v) <= HEX:
+        n = int(v, 16)
+        return v[4:], (n >> 28) & 0x3F, (n >> 34) & 0x0F, bool((n >> 39) & 1), bool((n >> 38) & 1)
+    address = _callsign_address(callsign)
+    if len(v) > 8 and set(v[:2]) <= HEX and v[2] not in HEX:  # Wingman: flags byte + own id
+        flags = int(v[:2], 16)
+        return address, flags & 0x03, (flags >> 2) & 0x0F, bool(flags & 0x80), bool(flags & 0x40)
+    if len(v) == 6 and set(v) <= HEX:  # AirMate: plain address
+        return v, 0, 0, False, False
+    return address, 0, 0, False, False
+
+
+def _callsign_address(callsign: str) -> str:
+    tail = callsign[3:].upper()
+    return tail if len(tail) == 6 and set(tail) <= HEX else callsign.upper()[:8]
+
+
+def is_receiver(tocall: str, path: str | None) -> bool:
+    return normalize_tocall(tocall) in RECEIVER_TOCALLS or bool(path and ("TCPIP" in path or "qAC" in path))
+
+
 def _receiver(path: str | None) -> str | None:
     if not path:
         return None
@@ -144,14 +180,16 @@ def parse_line(line: str, reference: datetime) -> AircraftBeacon | StatusBeacon 
     if not header:
         return None
     callsign = header["callsign"]
-    tocall = header["tocall"]
+    tocall = normalize_tocall(header["tocall"])  # "OGNAVI-1" -> "OGNAVI"
     path = header["path"]
     payload = header["payload"]
-    if tocall in RECEIVER_TOCALLS or (path and "TCPIP" in path):
+    if tocall in RECEIVER_TOCALLS:
         return None
     source = source_for(tocall)
 
     if payload.startswith(">"):
+        if is_receiver(tocall, path):
+            return None
         m = STATUS_RE.match(payload)
         if not m:
             return None
@@ -171,11 +209,19 @@ def parse_line(line: str, reference: datetime) -> AircraftBeacon | StatusBeacon 
             if tm:
                 fields[key] = tm.groups()
                 break
-    if "id" not in fields:
-        return None  # not an aircraft (receivers, weather stations, ...)
+    if m["sym"] == "_" or m["alt"] is None:
+        return None  # weather station / no altitude
+    if "id" in fields:
+        address, address_type, aircraft_type, stealth, no_tracking = decode_id(fields["id"][0], callsign)
+    elif tocall in NO_ID_SOURCES and not is_receiver(tocall, path):
+        # e.g. Flymaster: no id field at all
+        address, address_type, stealth, no_tracking = _callsign_address(callsign), 0, False, False
+        aircraft_type = SOURCE_DEFAULT_TYPES.get(tocall, 0)
+    else:
+        return None  # receivers, weather stations, ...
+    if aircraft_type == 0:
+        aircraft_type = SOURCE_DEFAULT_TYPES.get(tocall, 0)
 
-    flags = int(fields["id"][0], 16)
-    address = fields["id"][1].upper()
     lat_extra = lon_extra = None
     if "precision" in fields:
         lat_extra, lon_extra = int(fields["precision"][0]), int(fields["precision"][1])
@@ -200,12 +246,12 @@ def parse_line(line: str, reference: datetime) -> AircraftBeacon | StatusBeacon 
         timestamp=ts,
         lat=lat,
         lon=lon,
-        alt=int(m["alt"]) * FEET_TO_M if m["alt"] else 0.0,
+        alt=int(m["alt"]) * FEET_TO_M,
         address=address,
-        address_type=flags & 0x03,
-        aircraft_type=(flags >> 2) & 0x0F,
-        stealth=bool(flags & 0x80),
-        no_tracking=bool(flags & 0x40),
+        address_type=address_type,
+        aircraft_type=aircraft_type,
+        stealth=stealth,
+        no_tracking=no_tracking,
         raw=line,
     )
     if m["course"] is not None:
@@ -233,3 +279,12 @@ def parse_line(line: str, reference: datetime) -> AircraftBeacon | StatusBeacon 
     if "flight_level" in fields:
         beacon.flight_level = float(fields["flight_level"][0])
     return beacon
+
+
+def unparsed_aircraft_candidate(line: str) -> bool:
+    """True for a position message that is not from a ground/weather station but could not be decoded."""
+    header = HEADER_RE.match(line.strip())
+    if not header or is_receiver(header["tocall"], header["path"]):
+        return False
+    m = POSITION_RE.match(header["payload"])
+    return bool(m) and m["sym"] != "_" and m["alt"] is not None

@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -34,7 +34,7 @@ from ..elevation import ElevationService
 from ..models import Device, Fix, Flight
 from ..ogn.constants import category_for
 from ..ogn.ddb import DeviceDatabase
-from ..ogn.parser import AircraftBeacon, StatusBeacon, parse_line
+from ..ogn.parser import AircraftBeacon, StatusBeacon, parse_line, unparsed_aircraft_candidate
 from ..regions import Region, region_for
 from .geo import distance_m
 from .stats import FixPoint, compute_stats, simplify_track
@@ -212,7 +212,12 @@ class Tracker:
             "ignored_time": 0,
             "duplicates": 0,
             "glitches": 0,
+            "unparsed": 0,
         }
+        # what arrives, before any filtering (diagnostics)
+        self.sources: Counter[str] = Counter()
+        self.types: Counter[int] = Counter()
+        self.unparsed_samples: deque[str] = deque(maxlen=10)
         self.gap = timedelta(minutes=settings.flight_gap_minutes)
         self.resume = timedelta(minutes=settings.flight_resume_minutes)
         self.landing = timedelta(minutes=settings.landing_minutes)
@@ -230,6 +235,9 @@ class Tracker:
             self.process_beacon(parsed, received)
         elif isinstance(parsed, StatusBeacon):
             self.process_status(parsed)
+        elif unparsed_aircraft_candidate(line):
+            self.counters["unparsed"] += 1
+            self.unparsed_samples.append(line.strip()[:200])
 
     def process_status(self, status: StatusBeacon) -> None:
         if not status.name:
@@ -246,6 +254,8 @@ class Tracker:
     def process_beacon(self, b: AircraftBeacon, received: datetime | None = None) -> None:
         received = received or b.timestamp
         self.counters["beacons"] += 1
+        self.sources[b.source] += 1
+        self.types[b.aircraft_type] += 1
         if b.aircraft_type not in self.tracked_types:
             self.counters["ignored_type"] += 1
             return
