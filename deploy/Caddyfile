@@ -1,0 +1,8 @@
+# HTTPS reverse proxy (Let's Encrypt certificates are obtained automatically).
+{$PRACK_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy prack:8000 {
+		# live traffic is streamed with server-sent events
+		flush_interval -1
+	}
+}

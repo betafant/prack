@@ -1,0 +1,28 @@
+# systemd unit for running prack without Docker.
+#
+#   sudo useradd --system --home /opt/prack prack
+#   sudo git clone <repo> /opt/prack && cd /opt/prack
+#   sudo python3 -m venv .venv && sudo .venv/bin/pip install .
+#   sudo cp .env.example .env && sudo chown -R prack /opt/prack
+#   sudo cp deploy/prack.service /etc/systemd/system/ && sudo systemctl enable --now prack
+#   journalctl -u prack -f
+
+[Unit]
+Description=prack - OGN paragliding & glider tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prack
+WorkingDirectory=/opt/prack
+EnvironmentFile=/opt/prack/.env
+ExecStart=/opt/prack/.venv/bin/prack run
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/prack/data
+
+[Install]
+WantedBy=multi-user.target

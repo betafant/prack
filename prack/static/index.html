@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#07090c">
+  <title>prack · paragliding &amp; track</title>
+  <link rel="icon" href="/static/img/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/vendor/maplibre-gl/maplibre-gl.css">
+  <link rel="stylesheet" href="/static/vendor/uplot/uPlot.min.css">
+  <link rel="stylesheet" href="/static/css/cockpit.css">
+</head>
+<body>
+<div class="app" id="app">
+
+  <!-- ============ GLARESHIELD / TOP BAR ============ -->
+  <header class="topbar panel">
+    <button class="key icon-key only-mobile" id="btn-menu" title="Flight list"><span class="led"></span>LIST</button>
+    <div class="brand" title="prack · paragliding &amp; track">
+      <img src="/static/img/icon.svg" alt="" class="brand-logo">
+      <div class="brand-text"><span class="brand-name">PRACK</span><span class="brand-sub">paragliding &amp; track</span></div>
+    </div>
+
+    <div class="mode-group">
+      <button class="key" id="btn-live" title="Live traffic (L)"><span class="led"></span>LIVE</button>
+      <button class="key icon-key" id="btn-prev" title="Previous day (←)">◀</button>
+      <button class="key date-key" id="btn-date" title="Calendar"><span class="led"></span><span id="date-label">----</span></button>
+      <button class="key icon-key" id="btn-next" title="Next day (→)">▶</button>
+    </div>
+
+    <div class="annunciators">
+      <div class="annun" id="ann-link" title="OGN APRS link"><span class="annun-top">OGN</span><span class="annun-val">----</span></div>
+      <div class="annun" id="ann-ac" title="Aircraft received in the last minutes"><span class="annun-top">A/C</span><span class="annun-val">--</span></div>
+      <div class="annun" id="ann-rx" title="Beacons per minute"><span class="annun-top">RX/MIN</span><span class="annun-val">--</span></div>
+      <div class="annun" id="ann-demo" hidden title="Simulated traffic"><span class="annun-top">MODE</span><span class="annun-val">DEMO</span></div>
+    </div>
+
+    <div class="clocks">
+      <div class="clock"><span>UTC</span><b id="clk-utc">--:--:--</b></div>
+      <div class="clock"><span id="clk-lcl-label">LCL</span><b id="clk-lcl">--:--:--</b></div>
+    </div>
+    <button class="key" id="btn-wx" title="Weather of the day (W)"><span class="led"></span>WX</button>
+  </header>
+
+  <!-- ============ FLIGHT LIST ============ -->
+  <aside class="sidebar panel" id="sidebar">
+    <div class="panel-title"><span id="list-title">TRAFFIC</span><span class="count" id="list-count">0</span></div>
+    <div class="key-row cats" id="cat-keys"></div>
+    <div class="key-row">
+      <button class="key small" id="btn-hidden" title="Show hidden flights"><span class="led"></span>HIDDEN</button>
+      <button class="key small" id="btn-ground" title="Show ground tracks / aircraft on ground"><span class="led"></span>GND</button>
+      <label class="select-wrap" title="Sort">
+        <span>SORT</span>
+        <select id="sort"></select>
+      </label>
+    </div>
+    <input id="search" class="search" type="search" placeholder="SEARCH NAME · REG · ID" autocomplete="off" spellcheck="false">
+    <ul class="flight-list" id="flight-list"></ul>
+    <div class="list-foot" id="list-foot"></div>
+  </aside>
+
+  <!-- ============ MAP (MFD) ============ -->
+  <main class="map-wrap">
+    <div id="map" class="screen"></div>
+    <div class="screen-glass"></div>
+    <div class="map-controls">
+      <button class="key" id="btn-3d" title="2D / 3D view (3)"><span class="led"></span>3D</button>
+      <button class="key" id="btn-follow" title="Follow selected aircraft (F)"><span class="led"></span>FLW</button>
+      <button class="key" id="btn-fit" title="Fit selected flight / region">FIT</button>
+      <button class="key" id="btn-trails" title="Trails / day tracks"><span class="led"></span>TRK</button>
+      <button class="key" id="btn-labels" title="Labels"><span class="led"></span>LBL</button>
+      <button class="key" id="btn-map" title="Map layer"><span class="led"></span>MAP</button>
+      <div class="key-pair">
+        <button class="key icon-key" id="btn-zoom-in" title="Zoom in">+</button>
+        <button class="key icon-key" id="btn-zoom-out" title="Zoom out">−</button>
+      </div>
+      <button class="key" id="btn-north" title="North up / reset view">N↑</button>
+    </div>
+    <div class="map-legend" id="map-legend"></div>
+    <div class="map-status" id="map-status"></div>
+    <div class="popover panel" id="basemap-menu" hidden></div>
+    <div class="toast" id="toast" hidden></div>
+
+    <!-- weather drawer -->
+    <section class="drawer panel" id="wx-drawer" hidden>
+      <div class="panel-title"><span>WX · <span id="wx-date">--</span></span>
+        <span class="drawer-actions">
+          <button class="key small" id="btn-wx-fetch" title="Download / refresh from Open-Meteo">FETCH</button>
+          <button class="key small icon-key" id="btn-wx-close" title="Close">✕</button>
+        </span>
+      </div>
+      <div class="wx-body" id="wx-body"></div>
+    </section>
+  </main>
+
+  <!-- ============ DETAILS / PFD ============ -->
+  <section class="details panel" id="details" hidden>
+    <div class="details-head">
+      <div class="ident">
+        <span class="badge" id="d-cat">--</span>
+        <div class="ident-text">
+          <b id="d-name">--</b>
+          <span id="d-sub">--</span>
+        </div>
+        <span class="annun small" id="d-state"><span class="annun-val">--</span></span>
+      </div>
+      <div class="actions">
+        <button class="key small" id="btn-hide" title="Hide / unhide this flight (H)"><span class="led"></span>HIDE</button>
+        <div class="export-group" id="export-group">
+          <span class="group-label">EXPORT</span>
+          <button class="key small" data-fmt="igc">IGC</button>
+          <button class="key small" data-fmt="kml">KML</button>
+          <button class="key small" data-fmt="gpx">GPX</button>
+          <button class="key small" data-fmt="csv">CSV</button>
+        </div>
+        <button class="key small icon-key" id="btn-close" title="Close (Esc)">✕</button>
+      </div>
+    </div>
+    <div class="details-body">
+      <div class="instruments">
+        <div class="gauge screen" id="vario"></div>
+        <div class="readouts" id="readouts"></div>
+      </div>
+      <div class="chart-wrap screen">
+        <div class="chart-head"><span>ALTITUDE / TIME</span><span class="chart-legend"><i class="lg-alt"></i>ALT <i class="lg-gnd"></i>GROUND</span><span id="chart-cursor"></span></div>
+        <div id="chart"></div>
+        <div class="chart-empty" id="chart-empty" hidden>NO TRACK</div>
+      </div>
+      <div class="stats" id="stats"></div>
+    </div>
+  </section>
+
+  <!-- calendar -->
+  <div class="popover panel calendar" id="calendar" hidden></div>
+</div>
+
+<script src="/static/vendor/maplibre-gl/maplibre-gl.js"></script>
+<script src="/static/vendor/deck.gl/deck.gl.min.js"></script>
+<script src="/static/vendor/uplot/uPlot.iife.min.js"></script>
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

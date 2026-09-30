@@ -1,0 +1,138 @@
+# Switzerland. Copy this file to add another region (e.g. at.toml, fr-alps.toml)
+# and enable it with PRACK_REGIONS=ch,at
+
+id = "ch"
+name = "Switzerland"
+timezone = "Europe/Zurich"
+# west, south, east, north (lon/lat, WGS84). New flights start only inside this box;
+# the OGN feed is requested with an extra margin (PRACK_OGN_FILTER_MARGIN_KM) so
+# cross-border legs keep being recorded.
+bbox = [5.85, 45.75, 10.55, 47.85]
+center = [8.23, 46.80]
+zoom = 7.4
+default_basemap = "swisstopo-grey"
+# Open-Meteo model; empty = automatic best match
+weather_model = ""
+
+[[basemaps]]
+id = "swisstopo-grey"
+name = "Swisstopo grey"
+tiles = ["https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-grau/default/current/3857/{z}/{x}/{y}.jpeg"]
+max_zoom = 18
+attribution = "© swisstopo"
+paint = { "raster-brightness-max" = 0.72, "raster-contrast" = 0.1 }
+
+[[basemaps]]
+id = "swisstopo"
+name = "Swisstopo"
+tiles = ["https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{z}/{x}/{y}.jpeg"]
+max_zoom = 18
+attribution = "© swisstopo"
+paint = { "raster-brightness-max" = 0.9 }
+
+[[basemaps]]
+id = "swissimage"
+name = "SWISSIMAGE"
+tiles = ["https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.swissimage/default/current/3857/{z}/{x}/{y}.jpeg"]
+max_zoom = 19
+attribution = "© swisstopo"
+
+[[basemaps]]
+id = "icao"
+name = "ICAO chart"
+tiles = ["https://wmts.geo.admin.ch/1.0.0/ch.bazl.luftfahrtkarten-icao/default/current/3857/{z}/{x}/{y}.png"]
+max_zoom = 13
+attribution = "© BAZL / swisstopo"
+
+[[basemaps]]
+id = "glider-chart"
+name = "Glider chart"
+tiles = ["https://wmts.geo.admin.ch/1.0.0/ch.bazl.segelflugkarte/default/current/3857/{z}/{x}/{y}.png"]
+max_zoom = 13
+attribution = "© BAZL / swisstopo"
+
+# Daily weather is stored for these points (hourly + daily summary).
+[[weather_points]]
+id = "geneva"
+name = "Genève"
+lat = 46.238
+lon = 6.109
+
+[[weather_points]]
+id = "jura"
+name = "Jura (Chasseral)"
+lat = 47.132
+lon = 7.054
+
+[[weather_points]]
+id = "bern"
+name = "Bern / Mittelland"
+lat = 46.948
+lon = 7.447
+
+[[weather_points]]
+id = "zurich"
+name = "Zürich-Kloten"
+lat = 47.458
+lon = 8.548
+
+[[weather_points]]
+id = "oberland"
+name = "Berner Oberland (Interlaken)"
+lat = 46.686
+lon = 7.864
+
+[[weather_points]]
+id = "central"
+name = "Zentralschweiz (Engelberg)"
+lat = 46.821
+lon = 8.407
+
+[[weather_points]]
+id = "valais"
+name = "Wallis (Fiesch)"
+lat = 46.408
+lon = 8.137
+
+[[weather_points]]
+id = "east"
+name = "Ostschweiz (Säntis)"
+lat = 47.249
+lon = 9.343
+
+[[weather_points]]
+id = "grisons"
+name = "Graubünden (Chur)"
+lat = 46.853
+lon = 9.530
+
+[[weather_points]]
+id = "engadin"
+name = "Engadin (Samedan)"
+lat = 46.534
+lon = 9.884
+
+[[weather_points]]
+id = "lugano"
+name = "Tessin (Lugano)"
+lat = 46.004
+lon = 8.960
+
+# Pressure gradients (a - b, hPa) that characterise the day.
+[[gradients]]
+id = "foehn"
+name = "Föhn index Lugano–Zürich"
+a = "lugano"
+b = "zurich"
+threshold = 4.0
+positive_label = "South föhn"
+negative_label = "North föhn"
+
+[[gradients]]
+id = "bise"
+name = "Bise index Zürich–Genève"
+a = "zurich"
+b = "geneva"
+threshold = 3.0
+positive_label = "Bise"
+negative_label = "Westerly"

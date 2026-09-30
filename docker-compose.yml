@@ -1,0 +1,53 @@
+# Local / VPS deployment.
+#
+#   cp .env.example .env            # adjust settings
+#   docker compose up -d --build    # http://<host>:8000
+#
+# With automatic HTTPS (set PRACK_DOMAIN in .env and point the DNS record to the server):
+#   docker compose --profile https up -d --build
+#
+# With PostgreSQL instead of SQLite (set PRACK_DATABASE_URL, see .env.example):
+#   docker compose --profile postgres up -d --build
+
+services:
+  prack:
+    build: .
+    image: prack:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PRACK_DATA_DIR: /data
+    ports:
+      - "${PRACK_PUBLISH:-8000}:8000"
+    volumes:
+      - prack_data:/data
+
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    restart: unless-stopped
+    depends_on: [prack]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PRACK_DOMAIN: ${PRACK_DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: prack
+      POSTGRES_USER: prack
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  prack_data:
+  caddy_data:
+  postgres_data:
