@@ -55,12 +55,14 @@ Requirements: Python 3.11+.
 ```bash
 git clone <this repository> prack && cd prack
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate          # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install .
 
 prack run                          # live OGN data  -> http://127.0.0.1:8000
 prack run --demo                   # simulated traffic + two simulated past days
 ```
+
+After downloading a newer version, run `pip install .` again (it also picks up new dependencies).
 
 Demo mode needs no OGN connection: it simulates paragliders, hang gliders and gliders over
 well-known Swiss sites, fills two past days into the archive and, if Open-Meteo cannot be reached,

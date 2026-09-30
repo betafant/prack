@@ -8,6 +8,7 @@ import csv
 import io
 import json
 import logging
+import mimetypes
 import secrets
 import time
 import zipfile
@@ -34,6 +35,22 @@ log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 router = APIRouter(prefix="/api")
+
+STATIC_TYPES = {
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
+    ".json": "application/json",
+}
+
+
+def pin_static_types() -> None:
+    """Python takes content types from the Windows registry, where ".js" is often "text/plain";
+    browsers refuse to run ES modules served like that. Pin the types the web app needs."""
+    for ext, content_type in STATIC_TYPES.items():
+        mimetypes.add_type(content_type, ext)
 
 # simplified tracks of active flights, recomputed at most every PREVIEW_TTL seconds
 PREVIEW_TTL = 60.0
@@ -558,6 +575,7 @@ def create_app(settings: Settings | None = None, runtime: Runtime | None = None,
     if settings.auth_enabled:
         app.add_middleware(BasicAuthMiddleware, username=settings.auth_user, password=settings.auth_password)
 
+    pin_static_types()
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/", include_in_schema=False)

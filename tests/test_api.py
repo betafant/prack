@@ -85,3 +85,15 @@ def test_basic_auth(runtime):
         assert c.get("/api/config").status_code == 401
         token = base64.b64encode(b"pilot:s3cret").decode()
         assert c.get("/api/config", headers={"Authorization": f"Basic {token}"}).status_code == 200
+
+
+def test_static_types_survive_bad_windows_registry(runtime):
+    import mimetypes
+
+    mimetypes.add_type("text/plain", ".js")  # what the Windows registry often says
+    app = create_app(runtime=runtime, start=False)
+    with TestClient(app) as c:
+        r = c.get("/static/js/app.js")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/javascript")
+        assert c.get("/static/css/cockpit.css").headers["content-type"].startswith("text/css")
