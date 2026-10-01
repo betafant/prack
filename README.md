@@ -96,7 +96,7 @@ Everything is configured with environment variables or a `.env` file in the work
 | `PRACK_DATABASE_URL` | SQLite | e.g. `postgresql+psycopg://user:pw@host/prack` |
 | `PRACK_REGIONS` | `ch` | comma separated region ids |
 | `PRACK_TRACKED_TYPES` | `1,6,7` | OGN aircraft types (1 glider, 6 hang glider, 7 paraglider, ...) |
-| `PRACK_MIN_FIX_INTERVAL` | `2` | seconds between stored fixes per aircraft |
+| `PRACK_MIN_FIX_INTERVAL` | `1` | seconds between stored fixes per aircraft (`1` keeps every FLARM position) |
 | `PRACK_AUTH_USER` / `PRACK_AUTH_PASSWORD` | – | HTTP basic auth for the whole app |
 | `PRACK_DEMO` | `false` | simulated traffic instead of OGN |
 
@@ -124,10 +124,16 @@ prack demo-seed --days 3                   # simulate past days (demo data)
   microlights and count as *unknown*. A "paraglider" that repeatedly flies faster than 130 km/h
   (hang glider: 180 km/h) is a wrongly configured device and is dropped; flights stored before
   are removed on the next start.
-- **One aircraft, several protocols**: a vario that sends e.g. FANET and ADS-L (or FLARM and ADS-L)
-  is shown and recorded once, under the preferred source: FANET (it carries the pilot's name),
-  then FLARM, OGN tracker, ADS-L. If the preferred source is heard later, the entry and its flight
-  switch over; flights recorded twice by older versions are merged on the next start.
+- **One aircraft, several protocols**: a pilot with FLARM and FANET (or a vario sending FANET and
+  ADS-L) is shown and recorded once, under the preferred source: FLARM (about one position per
+  second, the most detailed track), then FANET, OGN tracker, ADS-L. The FANET pilot name is kept
+  whichever source wins. Positions of a lower-ranked source are only used while the better one has
+  not been heard for 30 s, so they fill reception gaps without making the track zig-zag. If the
+  preferred source is heard later, the entry and its flight switch over; flights recorded twice by
+  older versions are merged on the next start.
+- **Live detail**: every received position is stored (`PRACK_MIN_FIX_INTERVAL=1`) and streamed to
+  the browser once per second, so live tracks have the full resolution of the source. The version
+  is shown at the bottom of the aircraft list.
 - Some sources (LiveTrack24, SPOT, Spider, SkyLines, Capturs, AirMate) do not transmit an aircraft
   type. They are "Unknown" and not tracked by default; add type `0` to `PRACK_TRACKED_TYPES` to
   include them (shown as OTH).
@@ -150,9 +156,10 @@ New flights are opened only inside a region's box. The OGN feed is requested wit
 - **Database**: SQLite by default (`data/prack.db`, WAL mode), PostgreSQL optional. Tables:
   `devices`, `flights`, `fixes` (one row per position, clustered by flight and time), `weather`
   (per day and point: summary, hourly and daily values), `ddb` (OGN device database copy).
-- **Storage**: a fix takes roughly 60–70 bytes in SQLite. With the default of one fix per 2 s,
-  a 2-hour paraglider flight is about 3600 fixes (~0.25 MB). A busy Swiss summer day with several
-  hundred flights is in the order of 100–200 MB. Increase `PRACK_MIN_FIX_INTERVAL` to store less.
+- **Storage**: a fix takes roughly 60–70 bytes in SQLite. FLARM sends a position every second
+  (FANET and OGN trackers less often), so a 2-hour FLARM flight is up to 7200 fixes (~0.5 MB). A
+  busy Swiss summer day with several hundred flights is in the order of 100–300 MB. Set
+  `PRACK_MIN_FIX_INTERVAL=2` to roughly halve that.
 - **Terrain**: ground elevation below each fix (AGL, barogram ground, 3D terrain) comes from the
   global [Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) dataset (~30 m resolution
   in the Alps), cached in `data/dem`.

@@ -55,6 +55,7 @@ SPEED_CHECK_WINDOW = 10  # recent fixes considered by the speed plausibility che
 SPEED_CHECK_LIMIT = 2  # implausibly fast fixes within the window that disqualify an aircraft
 ALIAS_MAX_DISTANCE_M = 3000.0  # same address, different protocol (FLARM / ADS-L / ...): same aircraft
 ALIAS_MAX_AGE = timedelta(minutes=10)
+SOURCE_HOLD_S = 30.0  # positions of a lower-ranked source are ignored while a better one is heard
 
 
 def takeoff_speed(aircraft_type: int) -> float:
@@ -168,6 +169,8 @@ class DeviceState:
     rejected: int = 0
     speed_flags: deque = field(default_factory=lambda: deque(maxlen=SPEED_CHECK_WINDOW))
     misclassified: bool = False  # flies too fast for its declared aircraft type
+    source_seen: dict = field(default_factory=dict)  # source -> time stamp of its latest position
+    prev_pos: tuple[float, float] | None = None  # last position of the previous flight
     # last closed flight (to resume after a coverage gap)
     prev_flight_id: int | None = None
     prev_reason: str | None = None
@@ -222,6 +225,7 @@ class Tracker:
             "unparsed": 0,
             "ignored_implausible": 0,
             "merged": 0,
+            "secondary": 0,
         }
         self.by_address: dict[str, str] = {}  # 24 bit address -> callsign of the state
         # what arrives, before any filtering (diagnostics)
@@ -307,17 +311,21 @@ class Tracker:
         if callsign is None or callsign == b.callsign:
             return None
         other = self.states.get(callsign)
-        if other is None or other.last is None:
+        if other is None:
             return None
-        if abs(b.timestamp - other.last.timestamp) > ALIAS_MAX_AGE:
+        if other.last is not None:
+            when, lat, lon = other.last.timestamp, other.last.lat, other.last.lon
+        elif other.prev_end is not None and other.prev_pos is not None:  # restored after a restart
+            when, (lat, lon) = other.prev_end, other.prev_pos
+        else:
             return None
-        if distance_m(other.last.lat, other.last.lon, b.lat, b.lon) > ALIAS_MAX_DISTANCE_M:
+        if abs(b.timestamp - when) > ALIAS_MAX_AGE or distance_m(lat, lon, b.lat, b.lon) > ALIAS_MAX_DISTANCE_M:
             return None
         return other
 
     def _unify(self, state: DeviceState | None, peer: DeviceState, b: AircraftBeacon, info) -> DeviceState:
         """Route a beacon of an aircraft that is also known under another callsign to a single state,
-        which carries the identity of the preferred source (FANET > FLARM > OGN tracker > ADS-L)."""
+        which carries the identity of the preferred source (FLARM > FANET > OGN tracker > ADS-L)."""
         self.counters["merged"] += 1
         if state is None:
             if source_priority(b.source) < source_priority(peer.source):
@@ -346,6 +354,8 @@ class Tracker:
         state.device_id = device_id
         if pilot_name:
             state.pilot_name = pilot_name
+        elif state.pilot_name:
+            self._store_pilot_name(state)
         self.states.pop(old, None)
         self.states[b.callsign] = state
         self.by_address[state.address] = b.callsign
@@ -358,6 +368,11 @@ class Tracker:
     def _absorb(self, primary: DeviceState, secondary: DeviceState) -> None:
         """Two states turned out to be the same aircraft: keep one state and one flight."""
         log.info("%s and %s are the same aircraft, keeping %s", primary.callsign, secondary.callsign, primary.callsign)
+        if secondary.pilot_name and not primary.pilot_name:
+            primary.pilot_name = secondary.pilot_name
+            self._store_pilot_name(primary)
+        for source, seen in secondary.source_seen.items():
+            primary.source_seen[source] = max(seen, primary.source_seen.get(source, seen))
         if secondary.flight is not None:
             if primary.flight is None:
                 primary.flight = secondary.flight
@@ -378,6 +393,10 @@ class Tracker:
             self.removed.append((self.seq, secondary.callsign))
         self.by_address[primary.address] = primary.callsign
         self._touch(primary)
+
+    def _store_pilot_name(self, state: DeviceState) -> None:
+        with self.db.session() as session, session.begin():
+            session.execute(update(Device).where(Device.id == state.device_id).values(pilot_name=state.pilot_name))
 
     def _reassign_flight(self, flight_id: int, state: DeviceState) -> None:
         self.flush(force=True)
@@ -495,6 +514,18 @@ class Tracker:
         state.seq = self.seq
 
     def _handle(self, state: DeviceState, b: AircraftBeacon) -> None:
+        # one device on several protocols: use the best source that is currently heard (FLARM's
+        # positions are more frequent and precise than FANET's); others only fill its gaps
+        state.source_seen[b.source] = b.timestamp
+        rank = source_priority(b.source)
+        best = min(
+            source_priority(source)
+            for source, seen in state.source_seen.items()
+            if abs((b.timestamp - seen).total_seconds()) <= SOURCE_HOLD_S
+        )
+        if rank > best:
+            self.counters["secondary"] += 1
+            return
         last = state.last
         if last is not None:
             if b.timestamp <= last.timestamp:
@@ -526,8 +557,8 @@ class Tracker:
         if self.elevation is not None:
             ground = self.elevation.get_cached(b.lat, b.lon)
             state.ground = ground
-        state.trail.append((b.timestamp, b.lat, b.lon, b.alt))
         self._touch(state)
+        state.trail.append((state.seq, b.timestamp, b.lat, b.lon, b.alt, b.speed, b.climb, b.track, state.ground))
 
         if state.flight is not None and b.timestamp - state.flight.end_time > self.gap:
             self._close(state, "gap", state.flight.end_time)
@@ -741,6 +772,7 @@ class Tracker:
         state.prev_flight_id = acc.flight_id
         state.prev_reason = reason
         state.prev_end = acc.end_time
+        state.prev_pos = acc.last_pos
         state.flight = None
         state.moving_count = 0
         state.stationary_since = None
@@ -815,6 +847,7 @@ class Tracker:
                     prev_flight_id=flight.id,
                     prev_reason="gap",
                     prev_end=flight.end_time,
+                    prev_pos=(flight.landing_lat, flight.landing_lon) if flight.landing_lat is not None else None,
                     live=False,
                 )
                 self.by_address[device.address] = device.callsign
@@ -839,7 +872,7 @@ class Tracker:
                     state.hidden = hidden
                     self._touch(state)
 
-    def _live_entry(self, state: DeviceState, trail: bool) -> dict:
+    def _live_entry(self, state: DeviceState, trail: bool, pts_since: int | None) -> dict:
         b = state.last
         assert b is not None
         entry = {
@@ -869,16 +902,30 @@ class Tracker:
             "takeoff": epoch(state.flight.start_time) if state.flight else None,
         }
         if trail:
-            entry["trail"] = [
-                [round(lon, 6), round(lat, 6), round(alt)] for (_ts, lat, lon, alt) in list(state.trail)[::2]
-            ] + [[round(b.lon, 6), round(b.lat, 6), round(b.alt)]]
+            entry["trail"] = [[round(p[3], 6), round(p[2], 6), round(p[4])] for p in state.trail]
+        if pts_since is not None:
+            # all positions received since the client's last update: full resolution live tracks
+            entry["pts"] = [
+                [
+                    epoch(p[1]), round(p[3], 6), round(p[2], 6), round(p[4]),
+                    None if p[5] is None else round(p[5], 1),
+                    None if p[6] is None else round(p[6], 1),
+                    p[7],
+                    None if p[8] is None else round(p[8]),
+                ]
+                for p in state.trail
+                if p[0] > pts_since
+            ]
         return entry
 
-    def live(self, since: int = 0, trail: bool = True) -> dict:
-        """Aircraft changed since ``since`` (sequence number) plus removals."""
+    def live(self, since: int = 0, trail: bool = True, pts_since: int | None = None) -> dict:
+        """Aircraft changed since ``since`` (sequence number) plus removals. With ``pts_since``, each
+        aircraft also carries every position received after that sequence number (``pts``)."""
+        if pts_since is None and not trail:
+            pts_since = since
         with self.lock:
             aircraft = [
-                self._live_entry(s, trail)
+                self._live_entry(s, trail, pts_since)
                 for s in self.states.values()
                 if s.live and s.last is not None and s.seq > since
             ]

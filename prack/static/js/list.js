@@ -125,7 +125,7 @@ export function renderList() {
   const foot = $('#list-foot');
   if (live) {
     const flying = [...state.live.values()].filter((a) => a.flying).length;
-    foot.innerHTML = `<span>${flying} AIRBORNE · ${state.live.size - flying} GND</span><span>OGN LIVE</span>`;
+    foot.innerHTML = `<span>${flying} AIRBORNE · ${state.live.size - flying} GND</span><span>OGN LIVE · v${state.config.version}</span>`;
   } else {
     const hidden = state.flights.filter((f) => f.hidden).length;
     const zip = `/api/days/${state.date}/export.zip?region=${state.region.id}`;

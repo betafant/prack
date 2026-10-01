@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from prack.models import Device, Fix, Flight
 from prack.ogn.ddb import DdbInfo
 from prack.ogn.parser import parse_line
-from prack.tracking.tracker import Finalizer, Tracker
+from prack.tracking.tracker import Finalizer, Tracker, epoch
 
 from .conftest import aprs, flight_lines
 
@@ -270,3 +270,104 @@ def test_stored_duplicates_are_merged_on_start(runtime):
     finalizer.drain()
     (flight,) = _flights(runtime)
     assert flight.source == "FANET" and flight.airborne
+
+
+FLARM_LAT = 46.6453  # flight_lines() flies due east on this latitude; the FANET positions are 11 m north
+
+
+def _flarm_and_fanet(start, minutes=10, fanet_every=4, flarm_silent=()):
+    """One paraglider carrying a FLARM (FLR112880, every second) and a FANET vario (FNT112880, every
+    ``fanet_every`` seconds, slightly different positions). FLARM is not heard for the fix indices in
+    ``flarm_silent``."""
+    lines = []
+    for i, (t, line) in enumerate(flight_lines(start, address="112880", minutes=minutes, step=1)):
+        if i not in flarm_silent:
+            lines.append((t, line))
+        if i % fanet_every == 0:
+            b = parse_line(line, t)
+            lines.append((t, aprs(t, b.lat + 0.0001, b.lon, b.alt + 5, b.speed or 0.0, int(b.track or 0),
+                                  b.climb or 0.0, "112880", 7, addr_type=3, prefix="FNT", tocall="OGNFNT")))
+    return lines
+
+
+def _stored_fixes(rt, flight_id):
+    with rt.db.session() as s:
+        return s.scalars(select(Fix).where(Fix.flight_id == flight_id).order_by(Fix.ts)).all()
+
+
+def test_flarm_preferred_over_fanet(runtime):
+    tracker = Tracker(runtime.db, runtime.settings, runtime.regions)
+    lines = _flarm_and_fanet(START, flarm_silent=range(10))  # FANET heard first, FLARM a few seconds later
+    lines.insert(30, (lines[29][0], 'FNT112880>OGNFNT,qAS,Rx:>090020h Name="Mia"'))
+    _run(tracker, lines)
+    (flight,) = _flights(runtime)
+    with runtime.db.session() as s:
+        device = s.get(Device, flight.device_id)
+    assert device.callsign == "FLR112880" and flight.source == "FLARM"
+    assert device.pilot_name == "Mia"  # the FANET name is kept
+    live = tracker.live(0)["aircraft"]
+    assert [a["id"] for a in live] == ["FLR112880"] and live[0]["name"] == "Mia"
+    assert tracker.counters["secondary"] > 0
+    fixes = _stored_fixes(runtime, flight.id)
+    assert len(fixes) == flight.fix_count
+    # FANET positions only until FLARM is heard, then every FLARM position (1/s)
+    flarm_from = START + timedelta(seconds=10)
+    assert all(f.ts < flarm_from for f in fixes if f.lat > FLARM_LAT + 0.00005)
+    after = [f for f in fixes if f.ts >= flarm_from]
+    assert len(after) == (flight.end_time - flarm_from).total_seconds() + 1
+
+
+def test_fanet_fills_flarm_gaps(runtime):
+    tracker = Tracker(runtime.db, runtime.settings, runtime.regions)
+    silent = range(300, 400)  # FLARM out of reception for 100 s in flight
+    _run(tracker, _flarm_and_fanet(START, flarm_silent=silent))
+    (flight,) = _flights(runtime)
+    assert flight.source == "FLARM"
+    fixes = _stored_fixes(runtime, flight.id)
+    fanet = [f for f in fixes if f.lat > FLARM_LAT + 0.00005]
+    gap_start, gap_end = START + timedelta(seconds=300), START + timedelta(seconds=400)
+    assert len(fanet) >= 15  # FANET positions after the 30 s hold, every 4 s
+    assert all(gap_start + timedelta(seconds=30) <= f.ts < gap_end for f in fanet)
+    assert len({f.ts for f in fixes}) == len(fixes)
+
+
+def test_restart_with_fanet_heard_first_resumes_flarm_flight(runtime):
+    lines = _flarm_and_fanet(START)
+    split = next(i for i, (t, _) in enumerate(lines) if t >= START + timedelta(minutes=5))
+    first = Tracker(runtime.db, runtime.settings, runtime.regions)
+    _run(first, lines[:split])
+    # prack restarts; FLARM is heard again only a few seconds after FANET
+    second = Tracker(runtime.db, runtime.settings, runtime.regions)
+    second.restore()
+    rest = [(t, line) for t, line in lines[split:]
+            if not (line.startswith("FLR") and t < START + timedelta(minutes=5, seconds=8))]
+    _run(second, rest)
+    (flight,) = _flights(runtime)
+    with runtime.db.session() as s:
+        device = s.get(Device, flight.device_id)
+    assert device.callsign == "FLR112880" and flight.close_reason == "landed"
+    assert [a["id"] for a in second.live(0)["aircraft"]] == ["FLR112880"]
+
+
+def test_live_updates_carry_every_new_position(runtime):
+    tracker = Tracker(runtime.db, runtime.settings, runtime.regions)
+    lines = _flarm_and_fanet(START)
+    _run(tracker, lines[:100])
+    seq = tracker.live(0)["seq"]
+    _run(tracker, lines[100:110])
+    (entry,) = tracker.live(seq, trail=False)["aircraft"]
+    # every FLARM position since the last update, none of the FANET duplicates
+    flarm_times = sorted({epoch(t) for t, line in lines[100:110] if line.startswith("FLR")})
+    assert [p[0] for p in entry["pts"]] == flarm_times
+    assert entry["pts"][-1][0] == entry["t"] and "trail" not in entry
+
+
+def test_full_snapshot_carries_new_positions_too(runtime):
+    tracker = Tracker(runtime.db, runtime.settings, runtime.regions)
+    lines = _flarm_and_fanet(START)
+    _run(tracker, lines[:100])
+    seq = tracker.live(0)["seq"]
+    _run(tracker, lines[100:110])
+    (entry,) = tracker.live(0, True, seq)["aircraft"]
+    assert entry["trail"] and len(entry["pts"]) == len([1 for _, line in lines[100:110] if line.startswith("FLR")])
+    assert "pts" not in tracker.live(0)["aircraft"][0]

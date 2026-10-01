@@ -226,7 +226,8 @@ async def live_stream(request: Request) -> StreamingResponse:
         while not await request.is_disconnected():
             now = time.monotonic()
             full = now - last_full >= 60.0
-            data = await asyncio.to_thread(tracker.live, 0 if full else since, full)
+            # the periodic full snapshot (with trails) also carries the positions since the last update
+            data = await asyncio.to_thread(tracker.live, 0 if full else since, full, since or None)
             if full:
                 last_full = now
             if full or data["aircraft"] or data["removed"]:
@@ -237,7 +238,7 @@ async def live_stream(request: Request) -> StreamingResponse:
             elif now - last_sent > 15:
                 last_sent = now
                 yield ": keep-alive\n\n"
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.0)
 
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     return StreamingResponse(events(), media_type="text/event-stream", headers=headers)

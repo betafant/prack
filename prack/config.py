@@ -82,7 +82,7 @@ class Settings:
     # What is tracked and how flights are cut
     tracked_types: tuple[int, ...] = DEFAULT_TRACKED_TYPES
     respect_stealth: bool = True
-    min_fix_interval: float = 2.0  # seconds between stored fixes per aircraft
+    min_fix_interval: float = 1.0  # seconds between stored fixes per aircraft (FLARM sends ~1/s)
     flight_gap_minutes: float = 20.0  # silence that ends a flight
     flight_resume_minutes: float = 90.0  # airborne again within this after a gap: same flight
     landing_minutes: float = 4.0  # stationary on ground this long: landed

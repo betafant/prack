@@ -10,7 +10,7 @@ import { initDetails, renderDetails, renderReadouts } from './details.js';
 import { Calendar } from './calendar.js';
 import { renderWeather } from './weather.js';
 
-const TRAIL_POINTS = 200;
+const TRAIL_POINTS = 400;
 const CURTAIN_MAX = 1500;
 
 let mapView;
@@ -102,15 +102,25 @@ function buildCurtain(tr) {
   tr.curtain = quads;
 }
 
-function appendLivePoint(a) {
+/** New positions of a live aircraft: every fix since the last update ([t, lon, lat, alt, spd, vs, hdg, gnd]). */
+function livePoints(a) {
+  return a.pts?.length ? a.pts : [[a.t, a.lon, a.lat, a.alt, a.spd, a.vs, a.hdg, a.gnd]];
+}
+
+function appendLivePoints(a) {
   const tr = state.track;
-  if (!tr || tr.id !== a.flight_id || !tr.t.length || a.t <= tr.t[tr.t.length - 1]) return false;
-  tr.t.push(a.t); tr.lat.push(a.lat); tr.lon.push(a.lon); tr.alt.push(a.alt); tr.gnd.push(a.gnd);
-  tr.spd.push(a.spd); tr.vs.push(a.vs); tr.hdg.push(a.hdg);
-  tr.path3.push([a.lon, a.lat, a.alt]);
-  tr.path2.push([a.lon, a.lat]);
-  if (tr.t.length % 10 === 0) buildCurtain(tr);
-  return true;
+  if (!tr || tr.id !== a.flight_id || !tr.t.length) return false;
+  let added = false;
+  for (const [t, lon, lat, alt, spd, vs, hdg, gnd] of livePoints(a)) {
+    if (t <= tr.t[tr.t.length - 1]) continue;
+    tr.t.push(t); tr.lat.push(lat); tr.lon.push(lon); tr.alt.push(alt); tr.gnd.push(gnd);
+    tr.spd.push(spd); tr.vs.push(vs); tr.hdg.push(hdg);
+    tr.path3.push([lon, lat, alt]);
+    tr.path2.push([lon, lat]);
+    added = true;
+  }
+  if (added && tr.t.length % 10 < 3) buildCurtain(tr);
+  return added;
 }
 
 const updateChart = throttle(() => {
@@ -280,7 +290,10 @@ function applyLive(msg) {
       // an aircraft that changed identity (e.g. ADS-L -> FANET) keeps its trail
       const prev = state.live.get(a.id) || [...state.live.values()].find((x) => x.address === a.address && x.id !== a.id);
       const trail = prev?.trail || [];
-      if (!prev || prev.t !== a.t) trail.push([a.lon, a.lat, a.alt]);
+      let lastT = prev?.t ?? 0;
+      for (const [t, lon, lat, alt] of livePoints(a)) {
+        if (t > lastT) { trail.push([lon, lat, alt]); lastT = t; }
+      }
       if (trail.length > TRAIL_POINTS) trail.splice(0, trail.length - TRAIL_POINTS);
       a.trail = trail;
       a.trail2d = trail.map((p) => [p[0], p[1]]);
@@ -306,7 +319,7 @@ function applyLive(msg) {
         loadSelectedFlight.pending = true;
         loadSelectedFlight().finally(() => { loadSelectedFlight.pending = false; });
       }
-    } else if (appendLivePoint(sel)) {
+    } else if (appendLivePoints(sel)) {
       state.versions.track++;
       updateChart();
     }
