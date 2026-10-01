@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 
 from prack.models import Device, Fix, Flight
 from prack.ogn.ddb import DdbInfo
+from prack.ogn.parser import parse_line
 from prack.tracking.tracker import Finalizer, Tracker
 
 from .conftest import aprs, flight_lines
@@ -208,3 +209,64 @@ def test_purge_implausible_flights(runtime):
         s.add(bad)
     assert tracker.purge_implausible() == 1
     assert [f.source for f in _flights(runtime)] == ["FLARM"]
+
+
+def _two_protocols(start, minutes=10, adsl_offset_deg=0.0, fanet_from=0):
+    """One vario sending ADS-L (ICA...) and FANET (FNT...); FANET heard from fix ``fanet_from`` on.
+    ``adsl_offset_deg`` shifts the ADS-L positions north during the first 120 fixes."""
+    lines = []
+    for i, (t, line) in enumerate(flight_lines(start, address="202B09", minutes=minutes)):
+        b = parse_line(line, t)
+        lat = b.lat + (adsl_offset_deg if i < 120 else 0.0)
+        speed, course = b.speed or 0.0, int(b.track or 0)
+        lines.append((t, aprs(t, lat, b.lon, b.alt, speed, course, b.climb or 0.0, "202B09", 7,
+                              addr_type=1, prefix="ICA", tocall="OGADSL")))
+        if i >= fanet_from:
+            t2 = t + timedelta(seconds=1)
+            lines.append((t2, aprs(t2, b.lat, b.lon, b.alt, speed, course, b.climb or 0.0, "202B09", 7,
+                                   addr_type=3, prefix="FNT", tocall="OGNFNT")))
+    return lines
+
+
+def test_fanet_identity_wins_when_heard_later(runtime):
+    tracker = Tracker(runtime.db, runtime.settings, runtime.regions)
+    lines = _two_protocols(START, fanet_from=90)  # ADS-L only at take-off, FANET joins in flight
+    lines.insert(200, (lines[199][0], 'FNT202B09>OGNFNT,qAS,Rx:>090501h Name="FluK"'))
+    _run(tracker, lines)
+    flights = _flights(runtime)
+    assert len(flights) == 1
+    with runtime.db.session() as s:
+        device = s.get(Device, flights[0].device_id)
+    assert device.callsign == "FNT202B09" and flights[0].source == "FANET"
+    live = tracker.live(0)["aircraft"]
+    assert [a["id"] for a in live] == ["FNT202B09"] and live[0]["name"] == "FluK"
+
+
+def test_two_existing_aircraft_are_merged_into_one_flight(runtime):
+    tracker = Tracker(runtime.db, runtime.settings, runtime.regions)
+    # the ADS-L positions are 6 km off for the first 4 minutes: two aircraft, two flights ...
+    lines = _two_protocols(START, adsl_offset_deg=0.05)
+    _run(tracker, lines[:200])
+    assert len(_flights(runtime)) == 2
+    # ... until they coincide: one aircraft, one flight, FANET identity
+    _run(tracker, lines[200:])
+    flights = _flights(runtime)
+    assert len(flights) == 1 and flights[0].source == "FANET"
+    assert [a["id"] for a in tracker.live(0)["aircraft"]] == ["FNT202B09"]
+    with runtime.db.session() as s:
+        stored = s.scalar(select(func.count()).select_from(Fix).where(Fix.flight_id == flights[0].id))
+    assert stored == flights[0].fix_count
+
+
+def test_stored_duplicates_are_merged_on_start(runtime):
+    # an older version recorded the same flight twice (FANET + ADS-L)
+    old = Tracker(runtime.db, runtime.settings, runtime.regions)
+    old._peer = lambda b: None  # no merging back then
+    _run(old, _two_protocols(START))
+    assert sorted(f.source for f in _flights(runtime)) == ["FANET", "OGN tracker (ADS-L)"]
+    finalizer = Finalizer(runtime.db, None)
+    fresh = Tracker(runtime.db, runtime.settings, runtime.regions, None, None, finalizer.enqueue)
+    assert fresh.merge_duplicate_flights() == 1
+    finalizer.drain()
+    (flight,) = _flights(runtime)
+    assert flight.source == "FANET" and flight.airborne

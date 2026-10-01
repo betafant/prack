@@ -27,12 +27,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.orm import aliased
 
 from ..config import Settings
 from ..db import Database, utcnow
 from ..elevation import ElevationService
 from ..models import Device, Fix, Flight
-from ..ogn.constants import MAX_TYPE_SPEED_KMH, category_for
+from ..ogn.constants import MAX_TYPE_SPEED_KMH, category_for, source_priority
 from ..ogn.ddb import DeviceDatabase
 from ..ogn.parser import AircraftBeacon, StatusBeacon, parse_line, unparsed_aircraft_candidate
 from ..regions import Region, region_for
@@ -252,7 +253,9 @@ class Tracker:
         if not status.name:
             return
         with self.lock:
-            state = self.states.get(status.callsign)
+            state = self.states.get(status.callsign) or self.states.get(
+                self.by_address.get(status.callsign[3:].upper(), "")
+            )
             if state is None or state.pilot_name == status.name:
                 return
             state.pilot_name = status.name[:64]
@@ -280,7 +283,10 @@ class Tracker:
             return
 
         with self.lock:
-            state = self.states.get(b.callsign) or self._same_aircraft(b)
+            state = self.states.get(b.callsign)
+            peer = self._peer(b)
+            if peer is not None and peer is not state:
+                state = self._unify(state, peer, b, info)
             if state is None:
                 if region_for(self.regions, b.lat, b.lon) is None:
                     self.counters["ignored_region"] += 1
@@ -292,30 +298,162 @@ class Tracker:
                 return
             self._handle(state, b)
 
-    def _same_aircraft(self, b: AircraftBeacon) -> DeviceState | None:
-        """A device heard under another callsign with the same address (e.g. FLARM and ADS-L) nearby."""
+    # -- one aircraft, several protocols -------------------------------------------------
+
+    def _peer(self, b: AircraftBeacon) -> DeviceState | None:
+        """The aircraft known under another callsign with the same address, recently heard nearby
+        (e.g. FANET and ADS-L of one vario)."""
         callsign = self.by_address.get(b.address)
-        other = self.states.get(callsign) if callsign else None
+        if callsign is None or callsign == b.callsign:
+            return None
+        other = self.states.get(callsign)
         if other is None or other.last is None:
             return None
         if abs(b.timestamp - other.last.timestamp) > ALIAS_MAX_AGE:
             return None
         if distance_m(other.last.lat, other.last.lon, b.lat, b.lon) > ALIAS_MAX_DISTANCE_M:
             return None
-        self.counters["merged"] += 1
         return other
+
+    def _unify(self, state: DeviceState | None, peer: DeviceState, b: AircraftBeacon, info) -> DeviceState:
+        """Route a beacon of an aircraft that is also known under another callsign to a single state,
+        which carries the identity of the preferred source (FANET > FLARM > OGN tracker > ADS-L)."""
+        self.counters["merged"] += 1
+        if state is None:
+            if source_priority(b.source) < source_priority(peer.source):
+                self._adopt_identity(peer, b, info)
+            return peer
+        primary, secondary = (state, peer) if self._preferred(state, peer) else (peer, state)
+        self._absorb(primary, secondary)
+        return primary
+
+    @staticmethod
+    def _preferred(a: DeviceState, b: DeviceState) -> bool:
+        pa, pb = source_priority(a.source), source_priority(b.source)
+        if pa != pb:
+            return pa < pb
+        start_a = a.flight.start_time if a.flight else datetime.max
+        start_b = b.flight.start_time if b.flight else datetime.max
+        return start_a <= start_b
+
+    def _adopt_identity(self, state: DeviceState, b: AircraftBeacon, info) -> None:
+        """Show (and record) the aircraft under the callsign of a preferred source from now on."""
+        old = state.callsign
+        device_id, pilot_name = self._ensure_device(b, info)
+        log.info("%s is the same aircraft as %s, continuing as %s", b.callsign, old, b.callsign)
+        state.callsign = b.callsign
+        state.source = b.source
+        state.device_id = device_id
+        if pilot_name:
+            state.pilot_name = pilot_name
+        self.states.pop(old, None)
+        self.states[b.callsign] = state
+        self.by_address[state.address] = b.callsign
+        self.seq += 1
+        self.removed.append((self.seq, old))
+        if state.flight is not None:
+            self._reassign_flight(state.flight.flight_id, state)
+        self._touch(state)
+
+    def _absorb(self, primary: DeviceState, secondary: DeviceState) -> None:
+        """Two states turned out to be the same aircraft: keep one state and one flight."""
+        log.info("%s and %s are the same aircraft, keeping %s", primary.callsign, secondary.callsign, primary.callsign)
+        if secondary.flight is not None:
+            if primary.flight is None:
+                primary.flight = secondary.flight
+                primary.hidden = secondary.hidden
+                primary.last_stored = secondary.last_stored
+                self._reassign_flight(primary.flight.flight_id, primary)
+            else:
+                self.flush(force=True)
+                with self.db.session() as session, session.begin():
+                    start, end, added = merge_flight_rows(self.db, session, primary.flight.flight_id, secondary.flight.flight_id)
+                acc = primary.flight
+                acc.start_time, acc.end_time = start, end
+                acc.fix_count += added
+                acc.dirty = True
+        self.states.pop(secondary.callsign, None)
+        if secondary.live:
+            self.seq += 1
+            self.removed.append((self.seq, secondary.callsign))
+        self.by_address[primary.address] = primary.callsign
+        self._touch(primary)
+
+    def _reassign_flight(self, flight_id: int, state: DeviceState) -> None:
+        self.flush(force=True)
+        with self.db.session() as session, session.begin():
+            session.execute(
+                update(Flight).where(Flight.id == flight_id).values(device_id=state.device_id, source=state.source)
+            )
+
+    def merge_duplicate_flights(self) -> int:
+        """Merge stored flights of one aircraft recorded twice over different protocols (same address,
+        overlapping in time, close together). Returns the number of removed duplicates."""
+        F1, F2 = aliased(Flight), aliased(Flight)
+        D1, D2 = aliased(Device), aliased(Device)
+        with self.db.session() as session:
+            pairs = session.execute(
+                select(F1.id, F1.source, F2.id, F2.source, F1.start_time, F1.end_time, F2.start_time, F2.end_time)
+                .join(D1, F1.device_id == D1.id)
+                .join(F2, F2.date == F1.date)
+                .join(D2, F2.device_id == D2.id)
+                .where(
+                    D1.address == D2.address,
+                    D1.id != D2.id,
+                    F1.id < F2.id,
+                    F1.start_time <= F2.end_time,
+                    F2.start_time <= F1.end_time,
+                )
+            ).all()
+        removed: set[int] = set()
+        merged: set[int] = set()
+        for id1, src1, id2, src2, s1, e1, s2, e2 in pairs:
+            if id1 in removed or id2 in removed:
+                continue
+            middle = max(s1, s2) + (min(e1, e2) - max(s1, s2)) / 2
+            if not self._flights_close(id1, id2, middle):
+                continue
+            keep, drop = (id1, id2) if source_priority(src1) <= source_priority(src2) else (id2, id1)
+            with self.db.session() as session, session.begin():
+                merge_flight_rows(self.db, session, keep, drop)
+            removed.add(drop)
+            merged.add(keep)
+        for flight_id in merged - removed:
+            if self.on_flight_closed:
+                self.on_flight_closed(flight_id)  # recompute statistics and preview
+        if removed:
+            log.info("Merged %d duplicate flights (same aircraft over two protocols)", len(removed))
+        return len(removed)
+
+    def _flights_close(self, id1: int, id2: int, when: datetime) -> bool:
+        window = timedelta(minutes=3)
+        with self.db.session() as session:
+            positions = []
+            for flight_id in (id1, id2):
+                fix = session.execute(
+                    select(Fix.lat, Fix.lon)
+                    .where(Fix.flight_id == flight_id, Fix.ts >= when - window, Fix.ts <= when + window)
+                    .order_by(Fix.ts)
+                    .limit(1)
+                ).first()
+                if fix is None:
+                    return False
+                positions.append(fix)
+        return distance_m(positions[0].lat, positions[0].lon, positions[1].lat, positions[1].lon) <= ALIAS_MAX_DISTANCE_M
 
     # -- state machine -----------------------------------------------------------------
 
-    def _create_state(self, b: AircraftBeacon, info) -> DeviceState:
+    def _ddb_identity(self, info) -> tuple[str | None, str | None, str | None, bool]:
+        if info is None:
+            return None, None, None, True
+        if info.identified:
+            return info.registration, info.competition_id, info.model, True
+        return None, None, info.model, False
+
+    def _ensure_device(self, b: AircraftBeacon, info) -> tuple[int, str | None]:
+        """Create or update the device row for the beacon's callsign. Returns (id, FANET pilot name)."""
         now = utcnow()
-        registration = competition_id = model = None
-        identified = True
-        if info is not None:
-            identified = info.identified
-            model = info.model
-            if identified:
-                registration, competition_id = info.registration, info.competition_id
+        registration, competition_id, model, identified = self._ddb_identity(info)
         with self.db.session() as session, session.begin():
             device = session.execute(select(Device).where(Device.callsign == b.callsign)).scalar_one_or_none()
             if device is None:
@@ -333,8 +471,11 @@ class Tracker:
             if b.hardware:
                 device.hardware_version = b.hardware
             session.flush()
-            device_id = device.id
-            pilot_name = device.pilot_name
+            return device.id, device.pilot_name
+
+    def _create_state(self, b: AircraftBeacon, info) -> DeviceState:
+        registration, competition_id, model, _identified = self._ddb_identity(info)
+        device_id, pilot_name = self._ensure_device(b, info)
         state = DeviceState(
             callsign=b.callsign,
             device_id=device_id,
@@ -703,6 +844,7 @@ class Tracker:
         assert b is not None
         entry = {
             "id": state.callsign,
+            "address": state.address,
             "device_id": state.device_id,
             "flight_id": state.flight.flight_id if state.flight else None,
             "type": state.aircraft_type,
@@ -742,6 +884,31 @@ class Tracker:
             ]
             removed = [cs for (seq, cs) in self.removed if seq > since] if since else []
             return {"seq": self.seq, "aircraft": aircraft, "removed": removed, "full": since == 0}
+
+
+def merge_flight_rows(db: Database, session, keep_id: int, drop_id: int) -> tuple[datetime, datetime, int]:
+    """Fold flight ``drop_id`` into ``keep_id``: fixes of the dropped flight are kept only where the kept
+    flight has no data (before / after it), so two receivers' positions never zig-zag. Returns the new
+    (start, end, number of copied fixes)."""
+    keep = session.get(Flight, keep_id)
+    drop = session.get(Flight, drop_id)
+    rows = session.scalars(
+        select(Fix).where(Fix.flight_id == drop_id, (Fix.ts < keep.start_time) | (Fix.ts > keep.end_time))
+    ).all()
+    copies = [{c.key: getattr(f, c.key) for c in Fix.__table__.columns} | {"flight_id": keep_id} for f in rows]
+    if copies:
+        session.execute(db.insert_ignore(Fix), copies)
+    keep.start_time = min(keep.start_time, drop.start_time)
+    keep.end_time = max(keep.end_time, drop.end_time)
+    if drop.takeoff_time and (keep.takeoff_time is None or drop.takeoff_time < keep.takeoff_time):
+        keep.takeoff_time = drop.takeoff_time
+    keep.fix_count = (keep.fix_count or 0) + len(copies)
+    keep.hidden = keep.hidden or drop.hidden
+    keep.updated_at = utcnow()
+    session.execute(delete(Fix).where(Fix.flight_id == drop_id))
+    session.delete(drop)
+    session.flush()
+    return keep.start_time, keep.end_time, len(copies)
 
 
 class Finalizer:

@@ -266,6 +266,7 @@ async function setHidden(flightId, hidden) {
 // ------------------------------------------------------------------ live data
 
 function applyLive(msg) {
+  const selectedBefore = selectedLive();
   if (msg.full) {
     const next = new Map();
     for (const a of msg.aircraft) {
@@ -276,7 +277,8 @@ function applyLive(msg) {
     state.live = next;
   } else {
     for (const a of msg.aircraft) {
-      const prev = state.live.get(a.id);
+      // an aircraft that changed identity (e.g. ADS-L -> FANET) keeps its trail
+      const prev = state.live.get(a.id) || [...state.live.values()].find((x) => x.address === a.address && x.id !== a.id);
       const trail = prev?.trail || [];
       if (!prev || prev.t !== a.t) trail.push([a.lon, a.lat, a.alt]);
       if (trail.length > TRAIL_POINTS) trail.splice(0, trail.length - TRAIL_POINTS);
@@ -287,6 +289,15 @@ function applyLive(msg) {
     for (const id of msg.removed || []) state.live.delete(id);
   }
   state.versions.live++;
+
+  if (selectedBefore && !state.live.has(selectedBefore.id)) {
+    // the selected aircraft continues under the callsign of a preferred source
+    const same = [...state.live.values()].find((a) => a.address === selectedBefore.address);
+    if (same) {
+      state.selected = { kind: 'live', id: same.id };
+      updateHash();
+    }
+  }
 
   const sel = selectedLive();
   if (sel) {

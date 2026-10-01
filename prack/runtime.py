@@ -61,6 +61,7 @@ class Runtime:
     def start(self) -> None:
         self.ddb.load_from_db()
         self.tracker.purge_implausible()
+        self.tracker.merge_duplicate_flights()
         reopened = self.tracker.restore()
         if reopened:
             log.info("%d flights from the previous run closed (resume if still airborne)", len(reopened))

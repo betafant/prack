@@ -123,8 +123,11 @@ prack demo-seed --days 3                   # simulate past days (demo data)
 - **Plausibility rules**: ADS-B targets in the "ultralight / hang glider / paraglider" category are
   microlights and count as *unknown*. A "paraglider" that repeatedly flies faster than 130 km/h
   (hang glider: 180 km/h) is a wrongly configured device and is dropped; flights stored before
-  are removed on the next start. The same device heard on two protocols (e.g. FLARM and ADS-L)
-  is shown and recorded once.
+  are removed on the next start.
+- **One aircraft, several protocols**: a vario that sends e.g. FANET and ADS-L (or FLARM and ADS-L)
+  is shown and recorded once, under the preferred source: FANET (it carries the pilot's name),
+  then FLARM, OGN tracker, ADS-L. If the preferred source is heard later, the entry and its flight
+  switch over; flights recorded twice by older versions are merged on the next start.
 - Some sources (LiveTrack24, SPOT, Spider, SkyLines, Capturs, AirMate) do not transmit an aircraft
   type. They are "Unknown" and not tracked by default; add type `0` to `PRACK_TRACKED_TYPES` to
   include them (shown as OTH).

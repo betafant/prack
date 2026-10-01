@@ -105,6 +105,15 @@ ADSB_TOCALLS = {"OGADSB", "OGNADSB"}
 MAX_TYPE_SPEED_KMH = {7: 130.0, 6: 180.0}
 
 
+# One device heard over several protocols (e.g. FANET + ADS-L, FLARM + ADS-L) is shown and recorded once,
+# under the identity of the preferred source. FANET first: it carries the pilot's name.
+SOURCE_PRIORITY = {"FANET": 0, "FLARM": 1, "OGN tracker": 2, "OGN tracker (ADS-L)": 3}
+
+
+def source_priority(source: str) -> int:
+    return SOURCE_PRIORITY.get(source, 9)
+
+
 def normalize_tocall(tocall: str) -> str:
     """Strip an APRS version suffix: "OGNAVI-1" -> "OGNAVI"."""
     return tocall.split("-", 1)[0].upper()
