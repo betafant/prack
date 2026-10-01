@@ -26,13 +26,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 
 from ..config import Settings
 from ..db import Database, utcnow
 from ..elevation import ElevationService
 from ..models import Device, Fix, Flight
-from ..ogn.constants import category_for
+from ..ogn.constants import MAX_TYPE_SPEED_KMH, category_for
 from ..ogn.ddb import DeviceDatabase
 from ..ogn.parser import AircraftBeacon, StatusBeacon, parse_line, unparsed_aircraft_candidate
 from ..regions import Region, region_for
@@ -50,6 +50,10 @@ MAX_SPEED_KMH = 500.0
 PRE_TAKEOFF_BUFFER_S = 60.0
 FLIGHT_UPDATE_SECONDS = 10.0
 TRAIL_POINTS = 360
+SPEED_CHECK_WINDOW = 10  # recent fixes considered by the speed plausibility check
+SPEED_CHECK_LIMIT = 2  # implausibly fast fixes within the window that disqualify an aircraft
+ALIAS_MAX_DISTANCE_M = 3000.0  # same address, different protocol (FLARM / ADS-L / ...): same aircraft
+ALIAS_MAX_AGE = timedelta(minutes=10)
 
 
 def takeoff_speed(aircraft_type: int) -> float:
@@ -161,6 +165,8 @@ class DeviceState:
     stationary_since: datetime | None = None
     stationary_anchor: tuple[float, float] | None = None
     rejected: int = 0
+    speed_flags: deque = field(default_factory=lambda: deque(maxlen=SPEED_CHECK_WINDOW))
+    misclassified: bool = False  # flies too fast for its declared aircraft type
     # last closed flight (to resume after a coverage gap)
     prev_flight_id: int | None = None
     prev_reason: str | None = None
@@ -213,7 +219,10 @@ class Tracker:
             "duplicates": 0,
             "glitches": 0,
             "unparsed": 0,
+            "ignored_implausible": 0,
+            "merged": 0,
         }
+        self.by_address: dict[str, str] = {}  # 24 bit address -> callsign of the state
         # what arrives, before any filtering (diagnostics)
         self.sources: Counter[str] = Counter()
         self.types: Counter[int] = Counter()
@@ -271,13 +280,30 @@ class Tracker:
             return
 
         with self.lock:
-            state = self.states.get(b.callsign)
+            state = self.states.get(b.callsign) or self._same_aircraft(b)
             if state is None:
                 if region_for(self.regions, b.lat, b.lon) is None:
                     self.counters["ignored_region"] += 1
                     return
                 state = self._create_state(b, info)
+                self.by_address[b.address] = b.callsign
+            if state.misclassified:
+                self.counters["ignored_implausible"] += 1
+                return
             self._handle(state, b)
+
+    def _same_aircraft(self, b: AircraftBeacon) -> DeviceState | None:
+        """A device heard under another callsign with the same address (e.g. FLARM and ADS-L) nearby."""
+        callsign = self.by_address.get(b.address)
+        other = self.states.get(callsign) if callsign else None
+        if other is None or other.last is None:
+            return None
+        if abs(b.timestamp - other.last.timestamp) > ALIAS_MAX_AGE:
+            return None
+        if distance_m(other.last.lat, other.last.lon, b.lat, b.lon) > ALIAS_MAX_DISTANCE_M:
+            return None
+        self.counters["merged"] += 1
+        return other
 
     # -- state machine -----------------------------------------------------------------
 
@@ -343,6 +369,16 @@ class Tracker:
         if b.speed is None and last is not None:
             dt = (b.timestamp - last.timestamp).total_seconds()
             b.speed = distance_m(last.lat, last.lon, b.lat, b.lon) / dt * 3.6 if dt > 0 else 0.0
+        limit = MAX_TYPE_SPEED_KMH.get(b.aircraft_type)
+        if limit is not None and b.speed is not None:
+            too_fast = b.speed > limit
+            state.speed_flags.append(too_fast)
+            if too_fast:
+                if sum(state.speed_flags) >= SPEED_CHECK_LIMIT:
+                    self._disqualify(state, b)
+                else:
+                    self.counters["glitches"] += 1
+                return
         state.last = b
         state.aircraft_type = b.aircraft_type
         state.live = True
@@ -360,6 +396,50 @@ class Tracker:
         else:
             self._store(state, b)
             self._check_landing(state, b)
+
+    def _disqualify(self, state: DeviceState, b: AircraftBeacon) -> None:
+        """The aircraft is much faster than its declared type allows: drop it and its open flight."""
+        log.info("%s reports aircraft type %s but flies %.0f km/h: ignored", state.callsign, b.aircraft_type, b.speed)
+        state.misclassified = True
+        self.counters["ignored_implausible"] += 1
+        if state.flight is not None:
+            self._discard_flight(state.flight.flight_id)
+            state.flight = None
+        state.prev_flight_id = None
+        if state.live:
+            state.live = False
+            self.seq += 1
+            self.removed.append((self.seq, state.callsign))
+
+    def _discard_flight(self, flight_id: int) -> None:
+        self.flush(force=True)
+        with self.db.session() as session, session.begin():
+            session.execute(delete(Fix).where(Fix.flight_id == flight_id))
+            session.execute(delete(Flight).where(Flight.id == flight_id))
+
+    def purge_implausible(self) -> int:
+        """Delete stored flights that cannot be what their aircraft type says (ADS-B "paragliders",
+        "paragliders" at 300 km/h). Returns the number of deleted flights."""
+        doomed: list[int] = []
+        with self.db.session() as session:
+            for aircraft_type, limit in MAX_TYPE_SPEED_KMH.items():
+                rows = session.execute(
+                    select(Flight.id, Flight.source).where(
+                        Flight.aircraft_type == aircraft_type,
+                        (Flight.source == "ADS-B") | (Flight.max_speed > limit),
+                    )
+                ).all()
+                for flight_id, source in rows:
+                    fast = session.scalar(
+                        select(func.count()).select_from(Fix).where(Fix.flight_id == flight_id, Fix.speed > limit)
+                    )
+                    if source == "ADS-B" or fast >= SPEED_CHECK_LIMIT:
+                        doomed.append(flight_id)
+        for flight_id in doomed:
+            self._discard_flight(flight_id)
+        if doomed:
+            log.info("Deleted %d stored flights with an implausible aircraft type", len(doomed))
+        return len(doomed)
 
     def _maybe_takeoff(self, state: DeviceState, b: AircraftBeacon) -> None:
         state.pre_buffer.append(b)
@@ -596,6 +676,7 @@ class Tracker:
                     prev_end=flight.end_time,
                     live=False,
                 )
+                self.by_address[device.address] = device.callsign
         for flight_id in closed:
             if self.on_flight_closed:
                 self.on_flight_closed(flight_id)

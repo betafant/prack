@@ -15,7 +15,14 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from .constants import NO_ID_SOURCES, RECEIVER_TOCALLS, SOURCE_DEFAULT_TYPES, normalize_tocall, source_for
+from .constants import (
+    ADSB_TOCALLS,
+    NO_ID_SOURCES,
+    RECEIVER_TOCALLS,
+    SOURCE_DEFAULT_TYPES,
+    normalize_tocall,
+    source_for,
+)
 
 KNOTS_TO_KMH = 1.852
 FEET_TO_M = 0.3048
@@ -221,6 +228,8 @@ def parse_line(line: str, reference: datetime) -> AircraftBeacon | StatusBeacon 
         return None  # receivers, weather stations, ...
     if aircraft_type == 0:
         aircraft_type = SOURCE_DEFAULT_TYPES.get(tocall, 0)
+    if tocall in ADSB_TOCALLS and aircraft_type in (6, 7):
+        aircraft_type = 0  # ADS-B "ultralight / hang glider / paraglider" category: microlights
 
     lat_extra = lon_extra = None
     if "precision" in fields:

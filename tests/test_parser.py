@@ -109,3 +109,12 @@ def test_stations_are_not_aircraft():
     assert parse_line("FNB1103CE>OGNFNT,TCPIP*,qAC,GLIDERN3:/183738h5057.95NI00801.00E&/A=001042", ref) is None
     assert parse_line("LILH>OGNSDR,TCPIP*,qAC,GLIDERN2:>132201h v0.2.7.RPI-GPU CPU:0.7 RAM:770.2/968.2MB", ref) is None
     assert parse_line("FLRDDEEF1>OGCAPT,qAS,CAPTURS:/062744h4845.03N/00230.46E'000/000/", ref) is None
+
+
+def test_adsb_paraglider_category_is_unknown():
+    # ADS-B emitter category "ultralight / hang glider / paraglider" is used by microlights
+    line = "ICA3FF19F>OGADSB,qAS,AVX1368:/065130h4730.12N/01041.92E^112/165/A=009836 !W51! id1D3FF19F +000fpm"
+    b = parse_line(line, datetime(2026, 10, 1, 6, 52))
+    assert (b.source, b.aircraft_type) == ("ADS-B", 0)
+    flarm_pg = parse_line(line.replace(">OGADSB", ">OGFLR").replace("ICA", "FLR"), datetime(2026, 10, 1, 6, 52))
+    assert flarm_pg.aircraft_type == 7

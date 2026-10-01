@@ -165,6 +165,10 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
             status = "dropped: no-tracking flag"
         elif b.stealth and settings.respect_stealth:
             status = "dropped: stealth (PRACK_RESPECT_STEALTH)"
+        elif (state := tracker.states.get(b.callsign)) is not None and state.misclassified:
+            status = "dropped: far too fast for its declared aircraft type"
+        elif (primary := tracker.by_address.get(b.address)) not in (None, b.callsign) and primary in tracker.states:
+            status = f"merged with {primary} (same device, other protocol)"
         elif b.callsign in tracker.states:
             status = "shown (in flight)" if tracker.states[b.callsign].flight else "shown (on ground: GND key)"
         elif region_for(regions, b.lat, b.lon) is None:

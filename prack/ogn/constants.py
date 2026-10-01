@@ -96,6 +96,15 @@ NO_ID_SOURCES = {"OGFLYM", "OGCAPT"}
 SOURCE_DEFAULT_TYPES = {"OGFLYM": 7}
 
 
+# ADS-B emitter category B4 ("ultralight / hang glider / paraglider") arrives as OGN type 7. Paragliders
+# and hang gliders do not carry ADS-B transponders, microlights do: such targets are "unknown".
+ADSB_TOCALLS = {"OGADSB", "OGNADSB"}
+
+# Highest plausible ground speed per aircraft type (km/h, incl. a strong tail wind). A "paraglider" that
+# keeps flying faster is a powered aircraft or a wrongly configured device.
+MAX_TYPE_SPEED_KMH = {7: 130.0, 6: 180.0}
+
+
 def normalize_tocall(tocall: str) -> str:
     """Strip an APRS version suffix: "OGNAVI-1" -> "OGNAVI"."""
     return tocall.split("-", 1)[0].upper()

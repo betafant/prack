@@ -146,3 +146,65 @@ def test_diagnostic_counters(runtime):
     # an unknown id format is still an aircraft, just without a type
     tracker.process_line("XYZ123456>OGNEW,qAS,Somewhere:/090000h4636.00N/00736.00E'000/000/A=001000 idWEIRD", ts)
     assert tracker.sources["OGNEW"] == 1 and tracker.types[0] == 1
+
+
+def _fast_flight(start, address="3FF19F", speed=306.0, n=30, aircraft_type=7):
+    """A "paraglider" crossing the Bernese Oberland at microlight speed."""
+    lines, t, lon = [], start, 7.60
+    for _ in range(n):
+        lon += speed / 3.6 * 2 / 76000  # ~76 km per degree of longitude at 46.7 N
+        lines.append((t, aprs(t, 46.70, lon, 3000, speed, 90, 0, address, aircraft_type)))
+        t += timedelta(seconds=2)
+    return lines
+
+
+def test_too_fast_paraglider_is_dropped(runtime):
+    tracker = Tracker(runtime.db, runtime.settings, runtime.regions)
+    _run(tracker, _fast_flight(START))
+    assert _flights(runtime) == []
+    assert tracker.live(0)["aircraft"] == []
+    assert tracker.counters["ignored_implausible"] == 29  # every fix after the second fast one
+    # a glider at the same speed is fine
+    _run(tracker, _fast_flight(START, address="3FF1A0", speed=200, aircraft_type=1))
+    assert len(_flights(runtime)) == 1
+
+
+def test_single_speed_spike_is_ignored(runtime):
+    tracker = Tracker(runtime.db, runtime.settings, runtime.regions)
+    lines = flight_lines(START, minutes=10)
+    i = 200  # in flight: one fix with a bogus 400 km/h ground speed
+    t, line = lines[i]
+    lines[i] = (t, line.replace("'090/019/", "'090/216/"))
+    assert "'090/216/" in lines[i][1]
+    _run(tracker, lines)
+    flights = _flights(runtime)
+    assert len(flights) == 1 and flights[0].close_reason == "landed"
+    assert tracker.counters["ignored_implausible"] == 0
+
+
+def test_same_device_on_two_protocols_is_one_aircraft(runtime):
+    tracker = Tracker(runtime.db, runtime.settings, runtime.regions)
+    lines = []
+    for t, line in flight_lines(START, address="2027D5", minutes=10):
+        lines.append((t, line))
+        # the same device also heard via ADS-L / OGN tracker, one second later
+        t2 = t + timedelta(seconds=1)
+        dup = line.replace("FLR2027D5>OGFLR", "ICA2027D5>OGADSL").replace(f"/{t:%H%M%S}h", f"/{t2:%H%M%S}h")
+        lines.append((t2, dup))
+    _run(tracker, lines)
+    assert len(_flights(runtime)) == 1
+    assert len(tracker.live(0)["aircraft"]) == 1
+    assert tracker.counters["merged"] > 0
+
+
+def test_purge_implausible_flights(runtime):
+    tracker = Tracker(runtime.db, runtime.settings, runtime.regions, None, None)
+    _run(tracker, flight_lines(START, address="000001"))  # a genuine paraglider flight
+    with runtime.db.session() as s, s.begin():  # an "ADS-B paraglider" stored by an older version
+        good = s.scalars(select(Flight)).one()
+        bad = Flight(device_id=good.device_id, region="ch", date=good.date, aircraft_type=7, source="ADS-B",
+                     status="closed", start_time=good.start_time, end_time=good.end_time,
+                     created_at=good.created_at, updated_at=good.updated_at, max_speed=306)
+        s.add(bad)
+    assert tracker.purge_implausible() == 1
+    assert [f.source for f in _flights(runtime)] == ["FLARM"]

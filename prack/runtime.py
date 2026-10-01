@@ -60,6 +60,7 @@ class Runtime:
 
     def start(self) -> None:
         self.ddb.load_from_db()
+        self.tracker.purge_implausible()
         reopened = self.tracker.restore()
         if reopened:
             log.info("%d flights from the previous run closed (resume if still airborne)", len(reopened))

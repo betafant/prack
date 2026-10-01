@@ -120,6 +120,11 @@ prack demo-seed --days 3                   # simulate past days (demo data)
   visible on [live.glidernet.org](https://live.glidernet.org). It lists every aircraft received,
   its type and source, and why it is shown or dropped (type not tracked, no-tracking flag,
   outside the region, ...). Aircraft on the ground are only listed with the **GND** key on.
+- **Plausibility rules**: ADS-B targets in the "ultralight / hang glider / paraglider" category are
+  microlights and count as *unknown*. A "paraglider" that repeatedly flies faster than 130 km/h
+  (hang glider: 180 km/h) is a wrongly configured device and is dropped; flights stored before
+  are removed on the next start. The same device heard on two protocols (e.g. FLARM and ADS-L)
+  is shown and recorded once.
 - Some sources (LiveTrack24, SPOT, Spider, SkyLines, Capturs, AirMate) do not transmit an aircraft
   type. They are "Unknown" and not tracked by default; add type `0` to `PRACK_TRACKED_TYPES` to
   include them (shown as OTH).
